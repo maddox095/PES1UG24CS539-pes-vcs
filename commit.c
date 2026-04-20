@@ -197,4 +197,28 @@ char *commit_create(const Index *idx, const char *message) {
     // 1. Build tree from the current index
     char *tree_hash = tree_from_index(idx);
 
+    // 2. Read current HEAD to get parent commit hash (NULL if first commit)
+    char parent[65] = {0};
+    head_read(parent);  // already implemented — reads .pes/HEAD → branch → hash
+
+    // 3. Get author from env variable
+    const char *author = pes_author();
+
+    // 4. Get current Unix timestamp
+    time_t now = time(NULL);
+
+    // 5. Build commit text
+    char buf[4096];
+    int len;
+    if (strlen(parent) > 0) {
+        len = snprintf(buf, sizeof(buf),
+            "tree %s\nparent %s\nauthor %s %ld\ncommitter %s %ld\n\n%s\n",
+            tree_hash, parent, author, now, author, now, message);
+    } else {
+        len = snprintf(buf, sizeof(buf),
+            "tree %s\nauthor %s %ld\ncommitter %s %ld\n\n%s\n",
+            tree_hash, author, now, author, now, message);
+    }
+
+
 }
