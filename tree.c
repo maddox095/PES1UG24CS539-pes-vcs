@@ -129,9 +129,35 @@ int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
 //   - object_write    : save that binary buffer to the store as OBJ_TREE
 //
 // Returns 0 on success, -1 on error.
-int tree_from_index(ObjectID *id_out) {
-    // TODO: Implement recursive tree building
-    // (See Lab Appendix for logical steps)
-    (void)id_out;
-    return -1;
+char *tree_from_index(const Index *idx) {
+    // This builds tree objects bottom-up from the index entries.
+    // For flat files (no subdirs), serialize all entries as one tree and write it.
+    // For nested paths like "src/main.c", group by top-level dir name,
+    // recursively create subtrees, then reference them in the root tree.
+
+    // Simplified version for flat structure:
+    TreeEntry entries[MAX_ENTRIES];
+    int count = 0;
+
+    for (int i = 0; i < idx->count; i++) {
+        // Copy mode, hash, name from index entry
+        entries[count].mode = idx->entries[i].mode;
+        hex_to_bytes(idx->entries[i].hash_hex, entries[count].hash);
+        strncpy(entries[count].name, idx->entries[i].path, MAX_PATH);
+        count++;
+    }
+
+    // Serialize tree: for each entry write "MODE NAME\0HASH_BYTES"
+    uint8_t buf[65536];
+    size_t offset = 0;
+    for (int i = 0; i < count; i++) {
+        int n = snprintf((char*)buf + offset, sizeof(buf) - offset,
+                         "%o %s", entries[i].mode, entries[i].name);
+        offset += n + 1;  // +1 for \0
+        memcpy(buf + offset, entries[i].hash, SHA256_DIGEST_LENGTH);
+        offset += SHA256_DIGEST_LENGTH;
+    }
+
+    // Write tree object and return its hash
+    return object_write(OBJ_TREE, buf, offset);
 }
