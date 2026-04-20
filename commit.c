@@ -193,32 +193,35 @@ int head_update(const ObjectID *new_commit) {
 //   - head_update       : moves the branch pointer to your new commit
 //
 // Returns 0 on success, -1 on error.
-char *commit_create(const Index *idx, const char *message) {
-    // 1. Build tree from the current index
-    char *tree_hash = tree_from_index(idx);
+int commit_create(const char *message, ObjectID *commit_id_out) {
+    if (!message || !commit_id_out) return -1;
 
-    // 2. Read current HEAD to get parent commit hash (NULL if first commit)
-    char parent[65] = {0};
-    head_read(parent);  // already implemented — reads .pes/HEAD → branch → hash
+    Commit commit;
+    memset(&commit, 0, sizeof(commit));
 
-    // 3. Get author from env variable
-    const char *author = pes_author();
+    if (tree_from_index(&commit.tree) != 0) return -1;
 
-    // 4. Get current Unix timestamp
-    time_t now = time(NULL);
-
-    // 5. Build commit text
-    char buf[4096];
-    int len;
-    if (strlen(parent) > 0) {
-        len = snprintf(buf, sizeof(buf),
-            "tree %s\nparent %s\nauthor %s %ld\ncommitter %s %ld\n\n%s\n",
-            tree_hash, parent, author, now, author, now, message);
+    if (head_read(&commit.parent) == 0) {
+        commit.has_parent = 1;
     } else {
-        len = snprintf(buf, sizeof(buf),
-            "tree %s\nauthor %s %ld\ncommitter %s %ld\n\n%s\n",
-            tree_hash, author, now, author, now, message);
+        commit.has_parent = 0;
     }
 
+    snprintf(commit.author, sizeof(commit.author), "%s", pes_author());
+    time_t now = time(NULL);
+    if (now == (time_t)-1) return -1;
+    commit.timestamp = (uint64_t)now;
+    snprintf(commit.message, sizeof(commit.message), "%s", message);
 
+    void *raw = NULL;
+    size_t raw_len = 0;
+    if (commit_serialize(&commit, &raw, &raw_len) != 0) return -1;
+
+    int rc = object_write(OBJ_COMMIT, raw, raw_len, commit_id_out);
+    free(raw);
+    if (rc != 0) return -1;
+
+    if (head_update(commit_id_out) != 0) return -1;
+
+    return 0;
 }
