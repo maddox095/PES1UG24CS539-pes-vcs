@@ -18,6 +18,7 @@
 #include <unistd.h>
 #include <openssl/evp.h>
 
+
 // ─── PROVIDED ────────────────────────────────────────────────────────────────
 
 void hash_to_hex(const ObjectID *id, char *hex_out) {
