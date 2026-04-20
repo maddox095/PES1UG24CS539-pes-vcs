@@ -114,6 +114,7 @@ int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
     return 0;
 }
 
+
 // ─── TODO: Implement these ──────────────────────────────────────────────────
 
 // Build a tree hierarchy from the current index and write all tree
