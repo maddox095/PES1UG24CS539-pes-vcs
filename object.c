@@ -93,10 +93,54 @@ int object_exists(const ObjectID *id) {
 
 //
 // Returns 0 on success, -1 on error.
-int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out) {
-    // TODO: Implement
-    (void)type; (void)data; (void)len; (void)id_out;
-    return -1;
+char *object_write(ObjectType type, const uint8_t *data, size_t size) {
+    // 1. Build the header string: "blob <size>\0" or "tree <size>\0" or "commit <size>\0"
+    const char *type_str = (type == OBJ_BLOB) ? "blob" :
+                           (type == OBJ_TREE) ? "tree" : "commit";
+    char header[64];
+    int hlen = snprintf(header, sizeof(header), "%s %zu", type_str, size) + 1;
+    // +1 to include the null byte in hlen
+
+    // 2. Combine header + data into one buffer
+    size_t total = hlen + size;
+    uint8_t *full = malloc(total);
+    memcpy(full, header, hlen);
+    memcpy(full + hlen, data, size);
+
+    // 3. SHA-256 hash of the full buffer
+    uint8_t hash[SHA256_DIGEST_LENGTH];
+    SHA256(full, total, hash);
+
+    // 4. Convert hash to hex string (64 chars)
+    char hex[65];
+    for (int i = 0; i < 32; i++)
+        sprintf(hex + i*2, "%02x", hash[i]);
+    hex[64] = '\0';
+
+    // 5. Build path: .pes/objects/XX/YYYY...
+    char dir[256], path[256];
+    snprintf(dir, sizeof(dir), ".pes/objects/%.2s", hex);
+    snprintf(path, sizeof(path), "%s/%s", dir, hex + 2);
+
+    // 6. Skip if already exists (deduplication)
+    if (access(path, F_OK) == 0) {
+        free(full);
+        return strdup(hex);
+    }
+
+    // 7. Create shard directory if needed
+    mkdir(dir, 0755);
+
+    // 8. Write to a temp file, then rename (atomic write)
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *f = fopen(tmp, "wb");
+    fwrite(full, 1, total, f);
+    fclose(f);
+    rename(tmp, path);
+
+    free(full);
+    return strdup(hex);  // caller must free
 }
 
 // Read an object from the store.
