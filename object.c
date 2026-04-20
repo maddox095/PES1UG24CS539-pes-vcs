@@ -165,8 +165,49 @@ char *object_write(ObjectType type, const uint8_t *data, size_t size) {
 //
 // The caller is responsible for calling free(*data_out).
 // Returns 0 on success, -1 on error (file not found, corrupt, etc.).
-int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out) {
-    // TODO: Implement
-    (void)id; (void)type_out; (void)data_out; (void)len_out;
-    return -1;
+uint8_t *object_read(const char *hex, ObjectType *type_out, size_t *size_out) {
+    // 1. Build path from hex
+    char path[256];
+    snprintf(path, sizeof(path), ".pes/objects/%.2s/%s", hex, hex + 2);
+
+    // 2. Open and read file
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    size_t fsize = ftell(f);
+    rewind(f);
+    uint8_t *full = malloc(fsize);
+    fread(full, 1, fsize, f);
+    fclose(f);
+
+    // 3. Verify integrity: recompute SHA-256 and compare to filename
+    uint8_t hash[SHA256_DIGEST_LENGTH];
+    SHA256(full, fsize, hash);
+    char computed[65];
+    for (int i = 0; i < 32; i++)
+        sprintf(computed + i*2, "%02x", hash[i]);
+    computed[64] = '\0';
+    if (strcmp(computed, hex) != 0) {
+        free(full);
+        return NULL;  // corrupted
+    }
+
+    // 4. Parse header: "blob 16\0..."
+    char *nul = memchr(full, '\0', fsize);
+    if (!nul) { free(full); return NULL; }
+
+    // Determine type
+    if (strncmp((char*)full, "blob", 4) == 0)       *type_out = OBJ_BLOB;
+    else if (strncmp((char*)full, "tree", 4) == 0)  *type_out = OBJ_TREE;
+    else                                             *type_out = OBJ_COMMIT;
+
+    // 5. Extract size from header
+    *size_out = atoi(strchr((char*)full, ' ') + 1);
+
+    // 6. Return data portion (after the \0)
+    size_t header_len = (nul - (char*)full) + 1;
+    uint8_t *data = malloc(*size_out);
+    memcpy(data, full + header_len, *size_out);
+    free(full);
+    return data;
 }
