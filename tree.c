@@ -129,6 +129,7 @@ int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
 //   - object_write    : save that binary buffer to the store as OBJ_TREE
 //
 // Returns 0 on success, -1 on error.
+
 char *tree_from_index(const Index *idx) {
     // This builds tree objects bottom-up from the index entries.
     // For flat files (no subdirs), serialize all entries as one tree and write it.
