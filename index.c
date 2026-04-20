@@ -160,11 +160,20 @@ void index_load(Index *idx) {
 //   - rename                           : atomically moving the temp file over the old index
 //
 // Returns 0 on success, -1 on error.
-int index_save(const Index *index) {
-    // TODO: Implement atomic index saving
-    // (See Lab Appendix for logical steps)
-    (void)index;
-    return -1;
+void index_save(const Index *idx) {
+    // Sort entries by path (use qsort with strcmp comparator)
+    // Write to temp file, fsync, then rename
+    char tmp[] = ".pes/index.tmp";
+    FILE *f = fopen(tmp, "w");
+    for (int i = 0; i < idx->count; i++) {
+        IndexEntry *e = &idx->entries[i];
+        fprintf(f, "%o %s %ld %zu %s\n",
+                e->mode, e->hash_hex, e->mtime, e->size, e->path);
+    }
+    fflush(f);
+    fsync(fileno(f));
+    fclose(f);
+    rename(tmp, ".pes/index");
 }
 
 // Stage a file for the next commit.
