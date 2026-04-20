@@ -9,6 +9,7 @@
 // TODO functions:     object_write, object_read
 
 #include "pes.h"
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -93,54 +94,101 @@ int object_exists(const ObjectID *id) {
 
 //
 // Returns 0 on success, -1 on error.
-char *object_write(ObjectType type, const uint8_t *data, size_t size) {
-    // 1. Build the header string: "blob <size>\0" or "tree <size>\0" or "commit <size>\0"
+int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out) {
+    if (!id_out) return -1;
+    if (len > 0 && !data) return -1;
+
     const char *type_str = (type == OBJ_BLOB) ? "blob" :
                            (type == OBJ_TREE) ? "tree" : "commit";
     char header[64];
-    int hlen = snprintf(header, sizeof(header), "%s %zu", type_str, size) + 1;
-    // +1 to include the null byte in hlen
+    int header_n = snprintf(header, sizeof(header), "%s %zu", type_str, len);
+    if (header_n < 0 || (size_t)header_n + 1 > sizeof(header)) return -1;
 
-    // 2. Combine header + data into one buffer
-    size_t total = hlen + size;
-    uint8_t *full = malloc(total);
-    memcpy(full, header, hlen);
-    memcpy(full + hlen, data, size);
+    size_t header_len = (size_t)header_n + 1; // include '\0'
+    size_t full_len = header_len + len;
+    uint8_t *full = malloc(full_len);
+    if (!full) return -1;
 
-    // 3. SHA-256 hash of the full buffer
-    uint8_t hash[SHA256_DIGEST_LENGTH];
-    SHA256(full, total, hash);
+    memcpy(full, header, header_len);
+    if (len > 0) memcpy(full + header_len, data, len);
 
-    // 4. Convert hash to hex string (64 chars)
-    char hex[65];
-    for (int i = 0; i < 32; i++)
-        sprintf(hex + i*2, "%02x", hash[i]);
-    hex[64] = '\0';
+    compute_hash(full, full_len, id_out);
 
-    // 5. Build path: .pes/objects/XX/YYYY...
-    char dir[256], path[256];
-    snprintf(dir, sizeof(dir), ".pes/objects/%.2s", hex);
-    snprintf(path, sizeof(path), "%s/%s", dir, hex + 2);
-
-    // 6. Skip if already exists (deduplication)
-    if (access(path, F_OK) == 0) {
+    // Deduplicate based on content-addressed filename.
+    if (object_exists(id_out)) {
         free(full);
-        return strdup(hex);
+        return 0;
     }
 
-    // 7. Create shard directory if needed
-    mkdir(dir, 0755);
+    char path[512];
+    object_path(id_out, path, sizeof(path));
 
-    // 8. Write to a temp file, then rename (atomic write)
-    char tmp[256];
-    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-    FILE *f = fopen(tmp, "wb");
-    fwrite(full, 1, total, f);
-    fclose(f);
-    rename(tmp, path);
+    char dir[512];
+    snprintf(dir, sizeof(dir), "%s", path);
+    char *slash = strrchr(dir, '/');
+    if (!slash) {
+        free(full);
+        return -1;
+    }
+    *slash = '\0';
+
+    if (mkdir(dir, 0755) != 0 && errno != EEXIST) {
+        free(full);
+        return -1;
+    }
+
+    char tmp_path[544];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+
+    int fd = open(tmp_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0) {
+        free(full);
+        return -1;
+    }
+
+    size_t written = 0;
+    while (written < full_len) {
+        ssize_t n = write(fd, full + written, full_len - written);
+        if (n <= 0) {
+            close(fd);
+            unlink(tmp_path);
+            free(full);
+            return -1;
+        }
+        written += (size_t)n;
+    }
+
+    if (fsync(fd) != 0) {
+        close(fd);
+        unlink(tmp_path);
+        free(full);
+        return -1;
+    }
+
+    if (close(fd) != 0) {
+        unlink(tmp_path);
+        free(full);
+        return -1;
+    }
+
+    if (rename(tmp_path, path) != 0) {
+        unlink(tmp_path);
+        free(full);
+        return -1;
+    }
+
+    int dfd = open(dir, O_RDONLY | O_DIRECTORY);
+    if (dfd >= 0) {
+        if (fsync(dfd) != 0) {
+            close(dfd);
+            free(full);
+            return -1;
+        }
+        close(dfd);
+    }
 
     free(full);
-    return strdup(hex);  // caller must free
+    return 0;
 }
 
 // Read an object from the store.
@@ -165,49 +213,97 @@ char *object_write(ObjectType type, const uint8_t *data, size_t size) {
 //
 // The caller is responsible for calling free(*data_out).
 // Returns 0 on success, -1 on error (file not found, corrupt, etc.).
-uint8_t *object_read(const char *hex, ObjectType *type_out, size_t *size_out) {
-    // 1. Build path from hex
-    char path[256];
-    snprintf(path, sizeof(path), ".pes/objects/%.2s/%s", hex, hex + 2);
+int object_read(const ObjectID *id, ObjectType *type_out, void **data_out, size_t *len_out) {
+    if (!id || !type_out || !data_out || !len_out) return -1;
 
-    // 2. Open and read file
+    char path[512];
+    object_path(id, path, sizeof(path));
+
     FILE *f = fopen(path, "rb");
-    if (!f) return NULL;
-    fseek(f, 0, SEEK_END);
-    size_t fsize = ftell(f);
-    rewind(f);
-    uint8_t *full = malloc(fsize);
-    fread(full, 1, fsize, f);
-    fclose(f);
+    if (!f) return -1;
 
-    // 3. Verify integrity: recompute SHA-256 and compare to filename
-    uint8_t hash[SHA256_DIGEST_LENGTH];
-    SHA256(full, fsize, hash);
-    char computed[65];
-    for (int i = 0; i < 32; i++)
-        sprintf(computed + i*2, "%02x", hash[i]);
-    computed[64] = '\0';
-    if (strcmp(computed, hex) != 0) {
-        free(full);
-        return NULL;  // corrupted
+    if (fseek(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return -1;
     }
 
-    // 4. Parse header: "blob 16\0..."
-    char *nul = memchr(full, '\0', fsize);
-    if (!nul) { free(full); return NULL; }
+    long end = ftell(f);
+    if (end < 0) {
+        fclose(f);
+        return -1;
+    }
+    size_t fsize = (size_t)end;
 
-    // Determine type
-    if (strncmp((char*)full, "blob", 4) == 0)       *type_out = OBJ_BLOB;
-    else if (strncmp((char*)full, "tree", 4) == 0)  *type_out = OBJ_TREE;
-    else                                             *type_out = OBJ_COMMIT;
+    if (fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return -1;
+    }
 
-    // 5. Extract size from header
-    *size_out = atoi(strchr((char*)full, ' ') + 1);
+    uint8_t *full = malloc(fsize);
+    if (!full) {
+        fclose(f);
+        return -1;
+    }
 
-    // 6. Return data portion (after the \0)
-    size_t header_len = (nul - (char*)full) + 1;
-    uint8_t *data = malloc(*size_out);
-    memcpy(data, full + header_len, *size_out);
+    size_t nread = fread(full, 1, fsize, f);
+    fclose(f);
+    if (nread != fsize) {
+        free(full);
+        return -1;
+    }
+
+    ObjectID computed_id;
+    compute_hash(full, fsize, &computed_id);
+    if (memcmp(computed_id.hash, id->hash, HASH_SIZE) != 0) {
+        free(full);
+        return -1;
+    }
+
+    uint8_t *nul = memchr(full, '\0', fsize);
+    if (!nul) {
+        free(full);
+        return -1;
+    }
+
+    ObjectType parsed_type;
+    char type_str[16];
+    unsigned long long declared_len = 0;
+    if (sscanf((char *)full, "%15s %llu", type_str, &declared_len) != 2) {
+        free(full);
+        return -1;
+    }
+
+    if (strcmp(type_str, "blob") == 0) parsed_type = OBJ_BLOB;
+    else if (strcmp(type_str, "tree") == 0) parsed_type = OBJ_TREE;
+    else if (strcmp(type_str, "commit") == 0) parsed_type = OBJ_COMMIT;
+    else {
+        free(full);
+        return -1;
+    }
+
+    size_t header_len = (size_t)(nul - full) + 1;
+    if (header_len > fsize) {
+        free(full);
+        return -1;
+    }
+
+    size_t data_len = fsize - header_len;
+    if (declared_len != data_len) {
+        free(full);
+        return -1;
+    }
+
+    size_t alloc_len = data_len > 0 ? data_len : 1;
+    void *data = malloc(alloc_len);
+    if (!data) {
+        free(full);
+        return -1;
+    }
+    if (data_len > 0) memcpy(data, full + header_len, data_len);
+
     free(full);
-    return data;
+    *type_out = parsed_type;
+    *data_out = data;
+    *len_out = data_len;
+    return 0;
 }
